@@ -1,0 +1,43 @@
+envFileUpdate:
+  clients:
+    - name: TestKund1
+      services:
+        - name: scopeguard-backend
+          updates:
+            - name: "FOO"
+              value: "BAR"
+            - name: "BAZ"
+              value: "QUX"
+          removals:
+            - name: "OLD_VAR"
+            - name: "OLD_VAR2"
+        - name: scopeguard-frontend
+          updates:
+            - name: "FRONTEND_FOO"
+              value: "FRONTEND_BAR"
+          removals:
+            - name: "FRONTEND_OLD_VAR"
+    - name: TestKund2
+      services:
+        - name: scopeguard-backend
+          updates:
+            - name: "FOO2"
+              value: "BAR2"
+            - name: "NEW_VAR"
+              value: "NEW_VALUE"
+          removals:
+            - name: "OLD_VAR2"
+        - name: scopeguard-frontend
+          updates:
+            - name: "FRONTEND_FOO2"
+              value: "FRONTEND_BAR2"
+          removals:
+            - name: "FRONTEND_OLD_VAR"
+
+# Template for updating env files for different clients and services
+# Copy this document and modify as needed
+# For each service, create a list of env keys to add/update and a list of keys to remove
+# Link to the file under 'path/to/file' on your local system
+# Then run the script with: python3 /path-to-python <path_to_yaml_file> in your terminal
+
+

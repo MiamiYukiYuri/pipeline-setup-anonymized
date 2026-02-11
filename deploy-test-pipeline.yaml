@@ -1,0 +1,47 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+name: DeployToTestVM
+
+trigger: none
+
+parameters:
+  - name: clients
+    type: object
+    default: 
+      - ClientTest
+
+  - name: services
+    type: object
+    default:
+      - name: service-a
+        version: 1.0.0-xxxxxxx
+        env_variable: SERVICE_A_TAG
+
+      - name: service-b
+        version: 1.0.0-yyyyyyy
+        env_variable: SERVICE_B_TAG
+
+      - name: service-c
+        version: 1.0.0-zzzzzzz
+        env_variable: SERVICE_C_TAG
+
+      - name: service-d
+        version: 1.0.0-aaaaaaa
+        env_variable: SERVICE_D_TAG
+        
+      - name: service-e
+        version: 1.0.0-bbbbbbb
+        env_variable: SERVICE_E_TAG
+
+stages:
+  - stage: Deploy
+    displayName: Deploy to TestVM
+    variables:
+      - group: Build-variables
+    jobs:
+      - ${{ each client in parameters.clients }}:
+          - template: templates/deploy-template.yaml
+            parameters:
+              hostname: ${{ client }}
+              secureFile: ${{ client }}.zip
+              services: ${{ parameters.services }}

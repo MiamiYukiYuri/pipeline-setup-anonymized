@@ -1,0 +1,125 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+parameters:
+  - name: sshUser
+    type: string
+  - name: sshPass
+    type: string
+  - name: agentIp
+    type: string
+  - name: threshold
+    type: number
+    default: 60
+  - name: activeRunDir
+    type: string
+    default: ''
+
+steps:
+
+  # ---------------------------------------
+  # 1. Check disk usage and decide cleanup
+  # ---------------------------------------
+  - script: |
+      echo "Checking disk usage on agent VM..."
+      USAGE=$(sshpass -p "${{ parameters.sshPass }}" ssh -o StrictHostKeyChecking=no "${{ parameters.sshUser }}@${{ parameters.agentIp }}" "df --output=pcent / | tail -1 | tr -dc '0-9'")
+      echo "Current disk usage: $USAGE%"
+
+      if [ "$USAGE" -gt ${{ parameters.threshold }} ]; then
+        echo "##vso[task.setvariable variable=RUN_CLEANUP]true"
+      else
+        echo "##vso[task.setvariable variable=RUN_CLEANUP]false"
+      fi
+    displayName: "Check disk usage before cleanup"
+    name: CheckDiskUsage
+
+  # ---------------------------------------
+  # 2. Cleanup step (SAFE, registry-aware)
+  # ---------------------------------------
+  - script: |
+      echo "Starting GENERIC agent cleanup..."
+
+      sshpass -p "${{ parameters.sshPass }}" ssh -o StrictHostKeyChecking=no \
+        "${{ parameters.sshUser }}@${{ parameters.agentIp }}" \
+        "ACTIVE_RUN_DIR='${{ parameters.activeRunDir }}' bash -s" <<'EOF'
+
+        set +e
+        set -o pipefail
+
+        REGISTRY_IMAGE="registry:2"
+        REGISTRY_VOLUME="registry-data"
+
+        ACTIVE_RUN_DIR=${ACTIVE_RUN_DIR:-}
+
+        echo "==> Measuring disk usage before cleanup..."
+        BEFORE_KB=$(df --output=used / | tail -1)
+        BEFORE_GB=$(awk "BEGIN { printf \"%.2f\", $BEFORE_KB / 1024 / 1024 }")
+        echo "Used GB before: $BEFORE_GB"
+
+        echo "==> Cleaning Azure DevOps work directories..."
+        for run_dir in /opt/azdo-agent/_work/[0-9]*; do
+          [ -d "$run_dir" ] || continue
+
+          if [ -n "$ACTIVE_RUN_DIR" ] && [ "$run_dir" = "$ACTIVE_RUN_DIR" ]; then
+            echo "Saving active run directory: $run_dir"
+            continue
+          fi
+
+          echo "Removing $run_dir"
+          rm -rf "$run_dir"
+        done
+
+        echo "==> Docker image cleanup (excluding registry)..."
+        docker images --format '{{.Repository}}:{{.Tag}}' | while read img; do
+          # Skydda registry-image
+          if [[ "$img" == registry:* ]]; then
+            echo "Skipping registry image: $img"
+            continue
+          fi
+
+          # Hoppa över images som används
+          if docker ps -a --format '{{.Image}}' | grep -qx "$img"; then
+            continue
+          fi
+
+          echo "Removing image: $img"
+          docker rmi "$img" || true
+        done
+
+        echo "==> Removing dangling Docker images..."
+        docker images --filter "dangling=true" -q | xargs -r docker rmi || true
+
+        echo "==> Pruning Docker build cache..."
+        docker builder prune -af || true
+
+        echo "==> Cleaning agent temp directory..."
+        rm -rf /opt/azdo-agent/_work/_temp/* || true
+
+        echo "==> Vacuuming system logs (older than 7 days)..."
+        sudo journalctl --vacuum-time=7d || true
+
+        echo "==> Cleaning npm cache (if present)..."
+        if command -v npm >/dev/null 2>&1; then
+          npm cache clean --force || true
+        fi
+
+        echo "==> Measuring disk usage after cleanup..."
+        AFTER_KB=$(df --output=used / | tail -1)
+        AFTER_GB=$(awk "BEGIN { printf \"%.2f\", $AFTER_KB / 1024 / 1024 }")
+        echo "Used GB after: $AFTER_GB"
+
+        FREED_KB=$((BEFORE_KB - AFTER_KB))
+        [ $FREED_KB -lt 0 ] && FREED_KB=0
+        FREED_GB=$(awk "BEGIN { printf \"%.2f\", $FREED_KB / 1024 / 1024 }")
+
+        echo "Freed space: $FREED_GB GB"
+        echo "$FREED_GB" > cleanup_freed_gb.txt
+
+        echo "==> Remaining disk space:"
+        df -h
+
+        echo "==> Remaining Docker images:"
+        docker images
+      EOF
+    displayName: "Cleanup agent VM"
+    condition: eq(variables['RUN_CLEANUP'], 'true')
+    name: CleanupStep

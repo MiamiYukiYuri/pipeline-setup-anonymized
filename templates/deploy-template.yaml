@@ -1,0 +1,372 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+parameters:
+  - name: hostname
+    type: string
+
+  - name: secureFile
+    type: string
+
+  - name: services
+    type: object
+
+  - name: isTestDeploy
+    type: string
+    default: false
+    
+  - name: templateRepoName
+    type: string
+    default: ""
+
+jobs:
+  - job: deploy_to_${{ parameters.hostname }}
+    displayName: Deploy to ${{ parameters.hostname }}
+    pool:
+      name: 'Lagge pool'
+    variables:
+      - group: "${{ parameters.hostname }}"
+
+    steps:
+      - checkout: self
+        fetchDepth: 0
+
+      # Download and extract env files
+      - template: download-and-extract-secure-file.yaml
+        parameters:
+          secureFile: ${{ parameters.secureFile }}
+
+      # Only download and extract GENERIC_CREDENTIALS if service-b is being deployed
+      - ${{ if contains(convertToJson(parameters.services), '"service-b"') }}:
+        - task: DownloadSecureFile@1
+          name: DownloadGenericCredentials
+          inputs:
+            secureFile: 'GenericCredentials.zip'
+          displayName: 'Download service-b certificate zip'
+
+        - script: |
+            unzip "$(DownloadGenericCredentials.secureFilePath)" -d $(Agent.TempDirectory)/generic-credentials
+            ls -l $(Agent.TempDirectory)/generic-credentials
+          displayName: 'Extract service-b certificate zip'
+
+      # Show versions to deploy
+      - script: |
+          echo "Deploying these versions:"
+          for service in $(echo '${{ convertToJson(parameters.services) }}' | jq -c '.[]'); do
+            name=$(echo "$service" | jq -r '.name')
+            version=$(echo "$service" | jq -r '.version')
+            echo "$name: $version"
+          done
+        displayName: 'Show versions to deploy'
+
+      - task: Bash@3
+        displayName: 'Trust target host key'
+        inputs:
+          targetType: inline
+          script: |
+            mkdir -p ~/.ssh
+            ssh-keyscan -H "$(IP)" >> ~/.ssh/known_hosts
+        env:
+          SSH_USER: $(SSH_USER)
+
+      - script: |
+            cat > setup-daemon.sh <<EOF
+            #!/bin/bash
+            if [ ! -f /etc/docker/daemon.json ]; then
+              echo "daemon.json not found, adding it!"
+              echo '{ "insecure-registries": ["REGISTRY_IP:PORT"] }' | sudo -S tee /etc/docker/daemon.json
+              sudo systemctl restart docker
+            else
+              echo "Found daemon.json, skipping creation..."
+            fi
+            EOF
+
+            chmod +x setup-daemon.sh
+            scp -i ~/.ssh/deploy_key setup-daemon.sh "${SSH_USER}@$(IP):/tmp/"
+            ssh -i ~/.ssh/deploy_key "${SSH_USER}@$(IP)" "echo $SSH_PASS | sudo -S /tmp/setup-daemon.sh"
+        displayName: 'Ensure daemon.json exists and configure insecure registry'
+        env:
+          SSH_USER: $(SSH_USER)
+          SSH_PASS: $(SSH_PASS)
+
+      - task: Bash@3
+        displayName: 'Ensure applications folder exists on VM'
+        inputs:
+          targetType: inline
+          script: |
+            ssh -o StrictHostKeyChecking=no -i ~/.ssh/scopeworks_id_rsa "$(SSH_USER)@$(IP)" "mkdir -p /home/$(SSH_USER)/applications"
+        env:
+          SSH_USER: $(SSH_USER)
+
+      # Copy env files to respective folder and create/update .env on VM
+      # This step also copies the generic cert files if service-b is being deployed
+      - task: Bash@3
+        displayName: 'Copy required files to respective folder'
+        inputs:
+          targetType: inline
+          script: |
+            echo "Services JSON: $SERVICES"
+            touch .env
+
+            # Hämta befintlig .env från VM vid testdeploy
+            if [[ "$IS_TEST_DEPLOY" == "true" ]]; then
+              scp -i ~/.ssh/scopeworks_id_rsa "$SSH_USER@$(IP):/home/$(SSH_USER)/applications/.env" .env
+            fi
+
+            # Uppdatera eller lägg till variabeln för varje service
+            for service in $(echo "$SERVICES" | jq -c '.[]'); do
+              name=$(echo "$service" | jq -r '.name')
+              version=$(echo "$service" | jq -r '.version')
+              env_variable=$(echo "$service" | jq -r '.env_variable')
+              echo "Deploying $name version $version"
+
+              env_file="$(Agent.TempDirectory)/env-files/${{ parameters.hostname }}/${name}/.env"
+
+              if [ ! -f "$env_file" ]; then
+                echo "⚠️ Env file for $name not found: $env_file"
+                exit 1
+              fi
+
+              # Uppdatera eller lägg till variabeln i .env
+              if [[ -n "$env_variable" && -n "$version" ]]; then
+                if grep -q "^$env_variable=" .env; then
+                  sed -i.bak "s|^$env_variable=.*|$env_variable=$version|" .env
+                  rm -f .env.bak
+                else
+                  echo "$env_variable=$version" >> .env
+                fi
+              fi
+
+              name_lower=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+              remote_path="/home/$(SSH_USER)/applications/${name_lower}/.env"
+              ssh -i ~/.ssh/deploy_key "$SSH_USER@$(IP)" "mkdir -p /home/${SSH_USER}/applications/${name_lower}"
+              scp -i ~/.ssh/deploy_key "$env_file" "$SSH_USER@$(IP):$remote_path"
+            done
+
+            if ! grep -q "^CLIENT=" .env; then
+              echo "CLIENT=$(echo "${CLIENT}" | tr '[:upper:]' '[:lower:]')" >> .env
+            fi
+
+            # Kopiera certifikatfilerna om scopeguard-backend deployas, avsluta pipan om det misslyckas
+            if echo "$SERVICES" | grep -q '"scopeguard-backend"'; then
+              scp -i ~/.ssh/deploy_key "$(Agent.TempDirectory)/generic-credentials/Generic/password.txt" "$SSH_USER@$(IP):/home/${SSH_USER}/applications/service-b/password.txt"
+              if [ $? -ne 0 ]; then
+                echo "❌ Misslyckades att kopiera password.txt till VM"
+                exit 1
+              fi
+
+              scp -i ~/.ssh/deploy_key "$(Agent.TempDirectory)/generic-credentials/Generic/klientcert.pfx" "$SSH_USER@$(IP):/home/${SSH_USER}/applications/service-b/klientcert.pfx"
+              if [ $? -ne 0 ]; then
+                echo "❌ Misslyckades att kopiera klientcert.pfx till VM"
+                exit 1
+              fi
+              
+              ssh -i ~/.ssh/deploy_key "$SSH_USER@$(IP)" "[ -f /home/$SSH_USER/applications/service-b/chrome.json ]"
+              if [ $? -ne 0 ]; then
+                echo "chrome.json saknas, försöker ladda ner ifrån repo"
+                curl -u :$AZURE_TOKEN "https://dev.azure.com/company/project/_apis/git/repositories/service-b/items?path=%2Fchrome.json&api-version=7.0" -o chrome.json
+                if [ $? -ne 0 ]; then
+                  echo "❌ Misslyckades att ladda ner chrome.json"
+                  exit 1
+                else
+                  scp -i ~/.ssh/deploy_key "chrome.json" "$SSH_USER@$(IP):/home/$(SSH_USER)/applications/service-b/chrome.json"
+                  if [ $? -ne 0 ]; then
+                    echo "❌ Misslyckades att kopiera över chrome.json"
+                    exit 1
+                  else
+                    echo "chrome.json kopierad!"
+                  fi
+                fi
+              fi
+            fi
+
+            if ! grep -q "^CLIENT=" .env; then
+              echo CLIENT=$CLIENT >> .env
+            fi
+            # Kopiera .env till VM
+            scp -i ~/.ssh/scopeworks_id_rsa ".env" "$SSH_USER@$(IP):/home/$(SSH_USER)/applications/.env"
+        env:
+          SERVICES: ${{ convertToJson(parameters.services) }}
+          SSH_USER: $(SSH_USER)
+          IS_TEST_DEPLOY: ${{ parameters.isTestDeploy }}
+          CLIENT: ${{ parameters.hostname }}
+          AZURE_TOKEN: $(GH_TOKEN)
+
+      # Copy docker-compose.yml to VM
+      - ${{ if ne(parameters.templateRepoName, '') }}:
+        - checkout: "${{ parameters.templateRepoName }}"
+          path: s/${{ parameters.templateRepoName }}
+
+      - script: |
+
+          if [[ -n "$TEMPLATE_REPO_NAME" && "$TEMPLATE_REPO_NAME" != "" ]]; then
+            COMPOSE_PATH="$(Pipeline.Workspace)/s/$TEMPLATE_REPO_NAME/templates/docker-compose.yml"
+          else
+            COMPOSE_PATH="$(Build.SourcesDirectory)/templates/docker-compose.yml"
+          fi
+
+          scp -i ~/.ssh/deploy_key "$COMPOSE_PATH" "${SSH_USER}@$(IP):/home/${SSH_USER}/applications/docker-compose.yml"
+        displayName: 'Copy docker-compose.yml to VM'
+        env:
+          SSH_USER: $(SSH_USER)
+          TEMPLATE_REPO_NAME: ${{ parameters.templateRepoName }}
+
+      # Deploy Docker containers
+      - script: |
+          SERVICE_NAMES=""
+          for service in $(echo "$SERVICES" | jq -c '.[]'); do
+            name=$(echo "$service" | jq -r '.name')
+            SERVICE_NAMES="$SERVICE_NAMES $name"
+          done
+
+          ssh -i ~/.ssh/deploy_key "${SSH_USER}@$(IP)" <<EOF
+          set -e
+          cd /home/${SSH_USER}/applications
+          ls -l
+          docker compose --env-file .env up -d $SERVICE_NAMES
+          EOF
+        displayName: 'Deploy Docker containers'
+        env:
+          SERVICES: ${{ convertToJson(parameters.services) }}
+          SSH_USER: $(SSH_USER)
+
+      # Post-deploy verification and cleanup
+      - script: |
+          echo "🔍 Verifying that all expected containers are active and running..."
+          set -e
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$(IP)" "export SSH_USER=$SSH_USER; bash -s" <<"EOF"
+          set -euo pipefail
+          cd /home/$SSH_USER/applications
+
+          max_retries=30
+          retry=0
+
+          while true; do
+            containers=$(docker compose ps -q)
+            if [ -z "$containers" ]; then
+              echo "❌ No containers found! Check your docker-compose setup."
+              exit 1
+            fi
+
+            # Check for missing or inactive containers
+            expected_containers=(api-server scopeguard-frontend scopeguard-backend scopeguard-portal-frontend scopeguard-portal-backend)
+            running_names=$(docker ps --format '{{.Names}}')
+            for cname in "${expected_containers[@]}"; do
+              if ! echo "$running_names" | grep -wq "$cname"; then
+                echo "⚠️  $cname: NOT ACTIVE (saknas eller körs ej)"
+              else
+                echo "✅ $cname: ACTIVE"
+              fi
+            done
+
+            all_running=true
+            not_running=""
+            for cid in $containers; do
+              name=$(docker inspect --format '{{.Name}}' "$cid" | sed 's|/||')
+              status=$(docker inspect --format '{{.State.Status}}' "$cid" | xargs)
+              echo "Container $name status: $status"
+              if [[ "$status" != "running" ]]; then
+                echo "⛔ Container '$name' is NOT running (status: $status)"
+                all_running=false
+                not_running="$not_running $name"
+              fi
+            done
+
+            if [ "$all_running" = true ]; then
+              echo "✅ All active containers are running."
+              echo
+              echo "⏳ Waiting 15 seconds to verify containers stay running..."
+              sleep 15
+
+              # Kontrollera igen efter väntan
+              all_running=true
+              not_running=""
+              for cid in $containers; do
+                name=$(docker inspect --format '{{.Name}}' "$cid" | sed 's|/||')
+                status=$(docker inspect --format '{{.State.Status}}' "$cid" | xargs)
+                echo "Re-check: Container $name status: $status"
+                if [[ "$status" != "running" ]]; then
+                  echo "⛔ Container '$name' is NOT running after wait (status: $status)"
+                  all_running=false
+                  not_running="$not_running $name"
+                fi
+              done
+
+              echo
+              if [ "$all_running" = true ]; then
+                echo "✅ All active containers are still running after wait."
+                break
+              else
+                echo "❌ Some containers stopped after initial start:"
+                for name in $not_running; do
+                  echo "🔻 $name"
+                done
+                exit 1
+              fi
+            fi
+
+            retry=$((retry + 1))
+            if [[ $retry -ge $max_retries ]]; then
+              echo "❌ Some containers failed to start after waiting:"
+              docker compose ps
+
+              echo "🔻 Containers that did NOT start:"
+              for name in $not_running; do
+                echo "🔻 $name"
+              done
+
+              for cid in $containers; do
+                name=$(docker inspect --format '{{.Name}}' "$cid" | sed 's|/||')
+                status=$(docker inspect --format '{{.State.Status}}' "$cid")
+                if [ "$status" != "running" ]; then
+                  echo "🔻 Logs för $name:"
+                  docker logs "$cid" --tail 20
+                fi
+              done
+              exit 1
+            fi
+
+            echo "Waiting for containers to be running ($retry/$max_retries)..."
+            sleep 5
+          done
+          docker ps --format 'table {{.Names}}\t{{.Status}}'
+          EOF
+        displayName: 'Verify Docker containers are running'
+        env:
+          SSH_USER: $(SSH_USER)
+
+      - script: |
+          ssh -i ~/.ssh/deploy_key "$SSH_USER@$(IP)" <<'EOF'
+          set -e
+          echo "==> Pruning Docker: containers, images, volumes, networks..."
+          docker system prune -a --volumes -f
+          echo "==> Attempting to remove unused named volumes (not just dangling)..."
+          for vol in $(docker volume ls -qf dangling=false); do
+            if docker volume rm "$vol" 2>/dev/null; then
+              echo "Removed volume: $vol"
+            else
+              echo "Could not remove volume (probably in use): $vol"
+            fi
+          done
+          echo "==> Attempting to remove all images not in use..."
+          used_images=$(docker ps -aq | xargs -r docker inspect --format '{{.Image}}' | sort -u)
+          docker images -q | sort -u | while read img_id; do
+            if echo "$used_images" | grep -q "^$img_id$"; then
+              continue
+            fi
+            if docker rmi -f "$img_id" 2>err.log; then
+              echo "Removed image: $img_id"
+            else
+              if grep -q 'image is being used by running container' err.log; then
+                echo "Could not remove image (probably in use): $img_id"
+              else
+                echo "Error removing image $img_id:"; cat err.log
+              fi
+            fi
+            rm -f err.log
+          done
+          echo "==> Remaining Docker disk usage:"
+          docker system df
+          EOF
+        displayName: 'Clean up Docker: images, containers, volumes & networks'
+        env:
+          SSH_USER: $(SSH_USER)

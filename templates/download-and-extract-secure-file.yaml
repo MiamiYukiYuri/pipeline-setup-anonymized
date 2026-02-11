@@ -1,0 +1,19 @@
+parameters:
+  - name: secureFile
+    type: string
+
+steps:
+  - task: DownloadSecureFile@1
+    displayName: 'Download Secure File: ${{ parameters.secureFile }}'
+    inputs:
+      secureFile: ${{ parameters.secureFile }}
+
+  - task: Bash@3
+    displayName: 'Extract env files'
+    inputs:
+      targetType: inline
+      script: |
+        unzip -o $(Agent.TempDirectory)/${{ parameters.secureFile }} -d $(Agent.TempDirectory)/env-files
+        ls -l $(Agent.TempDirectory)/env-files
+        echo "##vso[task.setvariable variable=ENV_FILES_PATH]$(Agent.TempDirectory)/env-files"
+        echo "##vso[task.setvariable variable=ENV_FILES_PATH_OUT;isOutput=true]$(Agent.TempDirectory)/env-files"

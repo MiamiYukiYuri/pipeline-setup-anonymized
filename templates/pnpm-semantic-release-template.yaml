@@ -1,0 +1,67 @@
+parameters:
+  - name: servicePath
+    type: string
+    default: '.'
+  - name: ghToken
+    type: string
+
+steps:
+  - script: |
+      echo "Create release.config.cjs"
+      cd ${{ parameters.servicePath }}
+      cat > release.config.cjs <<'EOF'
+      const isMain = process.env.BUILD_SOURCEBRANCHNAME === 'main';
+      module.exports = {
+        branches: ['release*'],
+        ci: false,
+        plugins: [
+          ['@semantic-release/commit-analyzer', { releaseRules: [{ type: 'release', release: 'major' },{ type: 'feat', release: 'minor' },{ type: 'fix', release: 'patch' }], parserOpts: { noteKeywords: ['BREAKING CHANGE','BREAKING CHANGES'] } }],
+          '@semantic-release/release-notes-generator',
+          '@semantic-release/changelog',
+          ['@semantic-release/npm', { npmPublish: false }],
+          ['@semantic-release/exec', { prepareCmd: 'echo "{ \\"version\\": \\"${nextRelease.version}\\" }" > release-info.json' }],
+          [ '@semantic-release/git', { assets: ['package.json','CHANGELOG.md'], message: "deploy: ${nextRelease.version} [skip ci]" } ]
+        ]
+      };
+      EOF
+    displayName: "Create release.config.cjs"
+
+  - script: |
+      cd ${{ parameters.servicePath }}
+      export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
+      export PATH="$PNPM_HOME/bin:$PATH"
+      mkdir -p "$PNPM_HOME/dlx"
+      echo "Running semantic-release via pnpm dlx"
+      pnpm dlx \
+        --dir "$PNPM_HOME/dlx" \
+        --package semantic-release@25 \
+        --package @semantic-release/changelog@6 \
+        --package @semantic-release/commit-analyzer@12 \
+        --package @semantic-release/git@10 \
+        --package @semantic-release/release-notes-generator@14 \
+        --package @semantic-release/exec@7 \
+        --package @semantic-release/npm@13 \
+        semantic-release --logLevel=warn
+    displayName: "Run semantic-release"
+    env:
+      GH_TOKEN: ${{ parameters.ghToken }}
+
+  - task: Bash@3
+    displayName: 'Set version tag variable from release-info.json'
+    inputs:
+      targetType: 'inline'
+      script: |
+        cd ${{ parameters.servicePath }}
+        if [ -f release-info.json ]; then
+          VERSION=$(jq -r '.version' release-info.json)
+          echo "##vso[task.setvariable variable=IS_SEMVER_RELEASE]true"
+        else
+          VERSION=$(jq -r '.version' package.json)
+          SHORT_SHA=$(echo $(Build.SourceVersion) | cut -c1-7)
+          VERSION="${VERSION}-${SHORT_SHA}"
+          echo "{ \"version\": \"$VERSION\" }" > release-info.json
+        fi
+        echo "##vso[task.setvariable variable=RELEASE_OUTPUT_VERSION;isOutput=true]$VERSION"
+        echo "##vso[task.setvariable variable=RELEASE_VERSION]$VERSION"
+        echo "Version to tag image with: $VERSION"
+    name: setVersionStep

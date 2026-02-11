@@ -1,0 +1,13 @@
+# Node, build, editor och systemfiler
+node_modules/
+dist/
+build/
+*.log
+*.tmp
+.env
+.env.*
+.DS_Store
+.vscode/
+.idea/
+coverage/
+npm-debug.log*

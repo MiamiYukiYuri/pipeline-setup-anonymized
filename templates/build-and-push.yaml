@@ -1,0 +1,40 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+parameters:
+  - name: dockerfilePath
+    type: string
+    default: 'Dockerfile'
+
+  - name: contextPath
+    type: string
+    default: '.'
+
+  - name: version
+    type: string
+
+  - name: containerRegistry
+    type: string
+
+  - name: imageName
+    type: string
+
+steps:
+
+  displayName: "Build image ${{ parameters.imageName }}"
+  inputs:
+    command: 'build'
+    repository: "${{ parameters.containerRegistry }}/${{ parameters.imageName }}"
+    Dockerfile: ${{ parameters.imageName }}/Dockerfile
+    tags: |
+      ${{ parameters.version }}
+      latest
+
+  displayName: "Push image ${{ parameters.imageName }}"
+  # Pusha till registriyt om bygget sker på main (ej PR)
+  condition: and(always(), ne(variables['Build.SourceBranch'], ''), not(startsWith(variables['Build.SourceBranch'], 'refs/pull/')))
+  inputs:
+    command: 'push'
+    repository: "${{ parameters.containerRegistry }}/${{ parameters.imageName }}"
+    tags: |
+      ${{ parameters.version }}
+      latest

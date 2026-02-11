@@ -1,0 +1,189 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+parameters: 
+  - name: imageName
+    type: string
+
+  - name: docker_file
+    type: string
+    default: 'Dockerfile'
+
+  - name: containerRegistry
+    type: string
+    default: '172.18.21.121:5000'
+
+  - name: needsEnvFile
+    type: boolean
+    default: false
+
+stages:
+  - stage: build_and_push
+    displayName: 'Build and push'
+    jobs:
+      - job: prerequisites_job
+        displayName: "Pre-job"
+        pool:
+          name: "Lagge pool"
+        steps:
+          - script: |
+              if [[ "$BRANCH_NAME" == "refs/heads/main" ]]; then
+                test_deploy=true
+              else 
+                test_deploy=false
+              fi
+              echo "Test deploy: $test_deploy"
+              echo "##vso[task.setvariable variable=IS_MAIN_BRANCH;isOutput=true]$test_deploy"
+            displayName: 'Should deploy to test VM'
+            name: should_deploy
+            env:
+              BRANCH_NAME: $(Build.SourceBranch)
+      
+      - job: build_and_push
+        displayName: Build and push Docker image
+        dependsOn: prerequisites_job
+        pool:
+          name: "Agent_pool"
+        variables: 
+          - group: Build-variables 
+          - name: IS_SEMVER_RELEASE
+            value: ${{ coalesce(variables['IS_SEMVER_RELEASE'], 'false') }}
+
+        steps:
+          - checkout: self
+            fetchDepth: 0
+            clean: true
+            persistCredentials: true
+
+          # Install Node.js 22 for semantic-release
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '22.x'
+            displayName: 'Install Node.js 22 for semantic-release'
+
+          - script: |
+              corepack enable
+              corepack prepare pnpm@10.24.0 --activate
+              pnpm --version || true
+            displayName: "Enable pnpm (corepack)"
+
+          - script: |
+              echo "Configure pnpm home for semantic-release"
+              export PNPM_HOME="$HOME/.local/share/pnpm"
+              mkdir -p "$PNPM_HOME/bin"
+              mkdir -p "$PNPM_HOME/store"
+              export PATH="$PNPM_HOME/bin:$PATH"
+              pnpm config set global-bin-dir "$PNPM_HOME/bin"
+              pnpm config set store-dir "$PNPM_HOME/store" --global
+              echo "Using PNPM_HOME=$PNPM_HOME"
+              echo "##vso[task.setvariable variable=PNPM_HOME]$PNPM_HOME"
+              echo "##vso[task.setvariable variable=PATH]$PATH"
+            displayName: "Configure pnpm environment"
+
+          # Run semantic-release with pnpm
+          - template: pnpm-semantic-release-template.yaml
+            parameters:
+              servicePath: ${{ parameters.imageName }}
+              ghToken: $(GH_TOKEN)
+
+          # Switch back to Node.js 20 for project build (if needed)
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+            displayName: 'Install Node.js 20 for project build'
+
+          - template: build-and-push.yaml
+            parameters:
+                version: $(RELEASE_VERSION)
+                dockerFilePath: ${{ parameters.docker_file }}
+                imageName: ${{ parameters.imageName }}
+                containerRegistry: ${{ parameters.containerRegistry }}
+                needsEnvFile: ${{ parameters.needsEnvFile }} 
+
+          - checkout: production-node-release
+            persistCredentials: true
+            clean: true
+            fetchDepth: 0
+
+          - script: |
+              cd production-node-release
+              chmod +x scripts/update_version.sh
+
+              echo "Updating PROD deploy pipeline version..."
+              ./scripts/update_version.sh deploy-prod-pipeline.yaml ${{ parameters.imageName }} $(RELEASE_VERSION)
+              cat deploy-prod-pipeline.yaml
+              git add deploy-prod-pipeline.yaml
+              git commit -m "Update prod version for ${{ parameters.imageName }} with $(RELEASE_VERSION)"
+              git pull --rebase origin main
+              git push origin HEAD:main
+            displayName: 'Update version in PROD deploy pipeline'
+            condition: and(eq(variables['Build.SourceBranch'], 'refs/heads/release*'), eq(variables['IS_SEMVER_RELEASE'], 'true'))
+            env:
+              BUILD_SOURCE_BRANCH: $(Build.SourceBranch)
+              IS_SEMVER_RELEASE: $(IS_SEMVER_RELEASE)
+
+          - script: |
+              cd production-node-release
+              chmod +x scripts/update_version.sh
+
+              echo "Updating TEST deploy pipeline version..."
+              ./scripts/update_version.sh deploy-test-pipeline.yaml ${{ parameters.imageName }} $(RELEASE_VERSION)
+              cat deploy-test-pipeline.yaml
+              git add deploy-test-pipeline.yaml
+              git commit -m "Update test version for ${{ parameters.imageName }} with $(RELEASE_VERSION)"
+              git pull --rebase origin main
+              git push origin HEAD:main
+            displayName: 'Update version in TEST deploy pipeline'
+            condition: and(eq(variables['Build.SourceBranch'], 'refs/heads/main'), eq(variables['IS_SEMVER_RELEASE'], 'false'))
+            env:
+              BUILD_SOURCE_BRANCH: $(Build.SourceBranch)
+              IS_SEMVER_RELEASE: $(IS_SEMVER_RELEASE)
+
+          - template: agent-cleanup-template.yaml
+            parameters:
+              sshUser: $(SSH_USER)
+              sshPass: $(SSH_PASS)
+              agentIp: $(AGENT_VM_IP)
+              threshold: 60
+              activeRunDir: $(Agent.BuildDirectory)
+
+      - job: deploy_test_before
+        displayName: "Get image version tag for ${{ parameters.imageName }}"
+        pool:
+          name: "Agent_pool"
+        steps:
+          - script: |
+              result=""
+              if [ "${SERVICE_NAME#scopeguard-}" != "$SERVICE_NAME" ]; then
+                  rest="${SERVICE_NAME#scopeguard-}"
+                  result="SG_$(echo "$rest" | tr '[:lower:]' '[:upper:]' | tr '-' '_')_TAG"
+              else
+                  result="$(echo "$SERVICE_NAME" | tr '[:lower:]' '[:upper:]' | tr '-' '_')_TAG"
+              fi
+              echo "##vso[task.setvariable variable=SERVICE_ENV_VAR;isOutput=true]$result"
+              echo "Image version tag: $result"
+            displayName: Set image version tag
+            name: setServiceEnvVar
+            env:
+              SERVICE_NAME: ${{ parameters.imageName }}
+
+  - stage: Deploy_to_test
+    displayName: 'Deploy to test'
+    dependsOn: build_and_push
+    condition: and(succeeded(), eq(dependencies.build_and_push.outputs['prerequisites_job.should_deploy.IS_MAIN_BRANCH'], 'true'))
+    variables:
+      - name: version
+        value: $[ stageDependencies.build_and_push.build_and_push.outputs['setVersionStep.RELEASE_OUTPUT_VERSION'] ]
+      - name: SERVICE_ENV_VAR
+        value: $[ stageDependencies.build_and_push.deploy_test_before.outputs['setServiceEnvVar.SERVICE_ENV_VAR'] ]
+      - group: Build-variables 
+    jobs:
+      - template: deploy-template.yaml
+        parameters:
+          hostname: TestVM
+          secureFile: TestVM.zip
+          templateRepoName: production-node-release
+          services:
+            - name: ${{ parameters.imageName }}
+              version: $(version)
+              env_variable: $(SERVICE_ENV_VAR)
+          isTestDeploy: true

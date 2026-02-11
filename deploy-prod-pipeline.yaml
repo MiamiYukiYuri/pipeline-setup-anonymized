@@ -1,0 +1,53 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+name: DeployToVMs
+
+trigger: none
+
+parameters:
+  - name: clients
+    type: object
+    default: 
+      - ClientA
+      - ClientB
+      - ClientC
+      - ClientD
+      - ClientE
+      - ClientF
+       # <-- Add new client here
+
+  - name: services
+    type: object
+    default:
+      - name: service-a
+        version: 1.0.0
+        env_variable: SERVICE_A_TAG
+
+      - name: service-b
+        version: 1.1.0
+        env_variable: SERVICE_B_TAG
+
+      - name: service-c
+        version: 1.0.1
+        env_variable: SERVICE_C_TAG
+
+      - name: service-d
+        version: 1.0.1
+        env_variable: SERVICE_D_TAG
+        
+      - name: service-e
+        version: 1.0.1
+        env_variable: SERVICE_E_TAG
+
+stages:
+  - stage: Deploy
+    displayName: Deploy to VMs
+    variables:
+      - group: Build-variables
+    jobs:
+      - ${{ each client in parameters.clients }}:
+          - template: templates/deploy-template.yaml
+            parameters:
+              hostname: ${{ client }}
+              secureFile: ${{ client }}.zip
+              services: ${{ parameters.services }}

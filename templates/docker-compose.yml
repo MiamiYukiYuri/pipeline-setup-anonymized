@@ -1,0 +1,48 @@
+# OBS! Den här filen är anonymiserad för publicering. Alla företags- och kundspecifika namn är utbytta mot generiska namn.
+
+services:
+  service-a-frontend:
+    image: REGISTRY_IP:PORT/service-a-frontend:${SERVICE_A_FRONTEND_TAG}
+    container_name: service-a-frontend
+    env_file:
+      - ./service-a-frontend/.env
+    ports:
+      - 10000:10000
+
+  service-b-backend:
+    image: REGISTRY_IP:PORT/service-b-backend:${SERVICE_B_BACKEND_TAG}
+    container_name: service-b-backend
+    security_opt:
+      - seccomp:service-b-backend/chrome.json
+    env_file:
+      - ./service-b-backend/.env
+    ports:
+      - 10001:10001
+    volumes:
+      - /home/user/applications/service-b-backend/password.txt:/app/password.txt:ro
+      - /home/user/applications/service-b-backend/klientcert.pfx:/app/klientcert.pfx:ro
+      - /home/user/applications/service-b-backend/servercert.crt:/app/servercert.crt:ro
+
+  service-c-api:
+    image: REGISTRY_IP:PORT/service-c-api:${SERVICE_C_API_TAG}
+    container_name: service-c-api
+    env_file:
+      - ./service-c-api/.env
+    ports:
+      - 10002:10002
+
+  service-d-portal-frontend:
+    image: REGISTRY_IP:PORT/service-d-portal-frontend:${SERVICE_D_PORTAL_FRONTEND_TAG}
+    container_name: service-d-portal-frontend
+    env_file:
+      - ./service-d-portal-frontend/.env
+    ports:
+      - 10003:10003
+
+  service-e-portal-backend:
+    image: REGISTRY_IP:PORT/service-e-portal-backend:${SERVICE_E_PORTAL_BACKEND_TAG}
+    container_name: service-e-portal-backend
+    env_file:
+      - ./service-e-portal-backend/.env
+    ports:
+      - 10004:10004

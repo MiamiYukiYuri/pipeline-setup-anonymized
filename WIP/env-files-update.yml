@@ -1,0 +1,10 @@
+envFileUpdate:
+  clients:
+    - name: TestKund5
+  services:
+    - name: scopeguard-backend
+      updates: /Users/mias/env-updates
+      removals: ""
+    - name: scopeguard-frontend
+      updates: /Users/mias/env-updates2
+      removals: ""
